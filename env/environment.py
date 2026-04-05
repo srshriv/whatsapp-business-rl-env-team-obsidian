@@ -439,7 +439,7 @@ class WhatsAppEnv:
         if updates:
             self._state = s.with_updates(**updates)
 
-            
+
     def _maybe_create_agent_commitment(self, action: Action) -> None:
         """
         If the agent's message contains a commitment phrase, create an
@@ -654,36 +654,46 @@ class WhatsAppEnv:
         user_event: str,
         done: bool,
     ) -> Tuple[float, Dict[str, float]]:
-        """Delegate to Dev B's reward module; fall back to heuristic."""
+        """Delegate to reward module; fall back to heuristic if import fails."""
         try:
-            from reward.core import compute_step_reward  # type: ignore
-            reward, components = compute_step_reward(
-                state_before={
-                    "stage": before.stage,
-                    "annoyance": before.annoyance,
-                    "satisfaction": before.satisfaction,
-                    "cost_to_business": before.cost_to_business,
-                    "outcome": before.outcome,
-                    "violation_count": before.obligations.violation_count,
-                },
-                state_after={
-                    "stage": self._state.stage,
-                    "annoyance": self._state.annoyance,
-                    "satisfaction": self._state.satisfaction,
-                    "cost_to_business": self._state.cost_to_business,
-                    "outcome": self._state.outcome,
-                    "violation_count": self._state.obligations.violation_count,
-                },
-                action=action,
-                user_event=user_event,
-                done=done,
-                reward_weights=self.config.reward_weights,
+            from reward.core import compute_step_reward
+        except ImportError:
+            import warnings
+            warnings.warn(
+                "reward.core not found — using fallback reward. "
+                "Check that the reward/ package is on sys.path.",
+                RuntimeWarning,
+                stacklevel=2,
             )
-        except (ImportError, Exception):
-            reward, components = self._fallback_reward(before, action, done)
+            return self._fallback_reward(before, action, done)
 
+        state_before_dict = {
+            "stage":            before.stage,
+            "annoyance":        before.annoyance,
+            "satisfaction":     before.satisfaction,
+            "cost_to_business": before.cost_to_business,
+            "outcome":          before.outcome,
+            "violation_count":  before.obligations.violation_count,
+        }
+        state_after_dict = {
+            "stage":            self._state.stage,
+            "annoyance":        self._state.annoyance,
+            "satisfaction":     self._state.satisfaction,
+            "cost_to_business": self._state.cost_to_business,
+            "outcome":          self._state.outcome,
+            "violation_count":  self._state.obligations.violation_count,
+        }
+
+        reward, components = compute_step_reward(
+            state_before=state_before_dict,
+            state_after=state_after_dict,
+            action=action,
+            user_event=user_event,
+            done=done,
+            reward_weights=self.config.reward_weights,
+        )
         return reward, components
-
+        
     def _fallback_reward(
         self,
         before: State,

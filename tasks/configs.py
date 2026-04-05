@@ -1,154 +1,52 @@
 """
-Task configurations for the WhatsApp Business RL environment.
+tasks/configs.py
 
-Each TaskConfig defines:
-- Episode length and user type distributions.
-- Initial state variable ranges.
-- Reward weight overrides.
+Single source of truth for task configurations lives in env/environment.py.
+This module re-exports from there so any code that imports from tasks.configs
+continues to work without modification.
 """
-
-from dataclasses import dataclass, field
-from typing import Dict, Tuple
-
-
-@dataclass(frozen=True, kw_only=True)
-class TaskConfig:
-    """Configuration for a single task."""
-    
-    task_id: str
-    """Unique identifier for the task."""
-    
-    max_steps: int
-    """Maximum episode length."""
-    
-    user_type_probs: Dict[str, float]
-    """Probability distribution over user types."""
-    
-    initial_state_ranges: Dict[str, Tuple[float, float]]
-    """Initial ranges for latent state variables."""
-    
-    reward_weights: Dict[str, float] = field(default_factory=dict)
-    """Optional overrides for reward component weights."""
-    
-    description: str = ""
-    """Human-readable description of the task."""
-
-
-TASK1_CONFIG = TaskConfig(
-    task_id="task1",
-    max_steps=8,
-    user_type_probs={
-        "price_sensitive": 0.30,
-        "busy": 0.30,
-        "indecisive": 0.20,
-        "impulsive": 0.20,
-    },
-    initial_state_ranges={
-        "trust": (0.4, 0.7),
-        "patience": (0.5, 0.8),
-        "annoyance": (0.0, 0.2),
-        "satisfaction": (0.4, 0.7),
-        "conversion_prob": (0.2, 0.5),
-        "cost_to_business": (0.0, 0.0),
-    },
-    reward_weights={
-        "final_conversion": 1.0,
-        "churn_penalty": -1.0,
-        "step_engagement": 0.05,
-    },
-    description="Short horizon, simple inquiry handling, single product focus.",
-)
-
-
-TASK2_CONFIG = TaskConfig(
-    task_id="task2",
-    max_steps=12,
-    user_type_probs={
-        "price_sensitive": 0.35,
-        "busy": 0.20,
-        "indecisive": 0.30,
-        "impulsive": 0.15,
-    },
-    initial_state_ranges={
-        "trust": (0.3, 0.6),
-        "patience": (0.4, 0.7),
-        "annoyance": (0.0, 0.2),
-        "satisfaction": (0.3, 0.6),
-        "conversion_prob": (0.15, 0.45),
-        "cost_to_business": (0.0, 0.0),
-    },
-    reward_weights={
-        "final_conversion": 1.5,
-        "churn_penalty": -1.2,
-        "step_engagement": 0.04,
-        "obligation_complete": 0.1,
-    },
-    description="Multi-stage sales with negotiation and key info collection.",
-)
-
-
-TASK3_CONFIG = TaskConfig(
-    task_id="task3",
-    max_steps=16,
-    user_type_probs={
-        "price_sensitive": 0.30,
-        "busy": 0.25,
-        "indecisive": 0.25,
-        "impulsive": 0.20,
-    },
-    initial_state_ranges={
-        "trust": (0.2, 0.6),
-        "patience": (0.3, 0.7),
-        "annoyance": (0.0, 0.3),
-        "satisfaction": (0.2, 0.6),
-        "conversion_prob": (0.1, 0.4),
-        "cost_to_business": (0.0, 0.0),
-    },
-    reward_weights={
-        "final_conversion": 1.5,
-        "churn_penalty": -1.5,
-        "step_engagement": 0.03,
-        "obligation_complete": 0.15,
-        "obligation_expire": -0.3,
-    },
-    description="Longer episodes, mixed user types, more obligations and follow-ups.",
-)
-
-
-TASK_CONFIGS = {
-    "task1": TASK1_CONFIG,
-    "task2": TASK2_CONFIG,
-    "task3": TASK3_CONFIG,
-}
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "env"))
+from environment import TaskConfig, TASK_CONFIGS
 
 
 def get_task_config(task_id: str) -> TaskConfig:
     """
-    Get TaskConfig by ID.
-    
-    Raises KeyError if task_id not found.
+    Get TaskConfig by task_id.
+
+    Accepts both OpenEnv-style IDs (task1, task2, task3)
+    and difficulty names (easy, medium, hard).
+
+    Raises KeyError if task_id is not recognised.
     """
-    if task_id not in TASK_CONFIGS:
-        available = list(TASK_CONFIGS.keys())
+    # normalise task1/task2/task3 → easy/medium/hard
+    _ALIAS = {"task1": "easy", "task2": "medium", "task3": "hard"}
+    resolved = _ALIAS.get(task_id, task_id)
+
+    if resolved not in TASK_CONFIGS:
         raise KeyError(
             f"Unknown task_id '{task_id}'. "
-            f"Available tasks: {available}"
+            f"Valid values: {list(_ALIAS.keys()) + list(TASK_CONFIGS.keys())}"
         )
-    return TASK_CONFIGS[task_id]
+    return TASK_CONFIGS[resolved]
 
 
-    # OpenEnv compatibility export
 def get_openenv_config(task_id: str) -> dict:
     """
-    Returns plain dict for OpenEnv server (not TaskConfig object).
-    Compatible with make_env(task_id, config_dict).
+    Returns a plain dict for OpenEnv server compatibility.
     """
-    config = get_task_config(task_id)
+    cfg = get_task_config(task_id)
     return {
-        "task_id": config.task_id,
-        "max_steps": config.max_steps,
-        "user_type_probs": config.user_type_probs,
-        "initial_state_ranges": config.initial_state_ranges,
-        "reward_weights": config.reward_weights,
-        "description": config.description,
+        "task_id": task_id,          # keep original ID (task1/task2/task3)
+        "max_steps": cfg.max_steps,
+        "user_type_weights": cfg.user_type_weights,
+        "trust_range": cfg.trust_range,
+        "patience_range": cfg.patience_range,
+        "satisfaction_range": cfg.satisfaction_range,
+        "conversion_prob_range": cfg.conversion_prob_range,
+        "reward_weights": cfg.reward_weights,
     }
+
+
+__all__ = ["TaskConfig", "TASK_CONFIGS", "get_task_config", "get_openenv_config"]

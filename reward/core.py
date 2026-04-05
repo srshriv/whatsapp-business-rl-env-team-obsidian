@@ -1,89 +1,118 @@
+"""
+reward/core.py
+
+Computes per-step reward from state_before/state_after dicts and action.
+Called by environment.py's _compute_reward() with this exact signature:
+
+    compute_step_reward(
+        state_before = {...},
+        state_after  = {...},
+        action       = Action(...),
+        user_event   = "neutral" | "positive" | "frustrated" | ...,
+        done         = True | False,
+        reward_weights = {...},   # from TaskConfig, may be empty
+    )
+"""
+
+from __future__ import annotations
 from typing import Dict, Any, Tuple
-from models import Observation, Action  # NEW IMPORT
+
 
 def compute_step_reward(
-    obs: Observation,  # CHANGED: was state_before/after
-    action: Action,    # SIMPLIFIED
-    info: Dict[str, Any],  # CHANGED: was user_event + done
-    state_before: Dict[str, Any] = None,  # BACKWARD COMPAT
-    state_after: Dict[str, Any] = None,   # BACKWARD COMPAT  
+    state_before: Dict[str, Any],
+    state_after: Dict[str, Any],
+    action,                          # models.Action — avoid circular import
+    user_event: str,
+    done: bool,
+    reward_weights: Dict[str, float] = None,
 ) -> Tuple[float, Dict[str, float]]:
     """
-    Compute total reward and components for one step.
-    
-    obs: Current Observation (Pydantic)
-    action: Action object (Pydantic)
-    info: Contains user_event, done, state snapshots (backwards compat)
+    Compute total reward and per-component breakdown for one environment step.
+
+    Parameters
+    ----------
+    state_before    : snapshot of hidden State fields before the action
+    state_after     : snapshot of hidden State fields after the action
+    action          : the Action taken (Pydantic object with .action_type)
+    user_event      : string event from the user simulator
+    done            : whether the episode terminated this step
+    reward_weights  : optional per-task weight overrides (currently reserved)
+
+    Returns
+    -------
+    (total_reward: float, components: Dict[str, float])
     """
-    # Backward compatibility
-    user_event = info.get("user_event", "reply")
-    done = info.get("done", False)
-    state_before = state_before or info.get("state_before", {})
-    state_after = state_after or info.get("state_after", {})
-    
+    weights = reward_weights or {}
+
     components: Dict[str, float] = {
-        "engagement": 0.0,
-        "obligations": 0.0,
-        "relevance": 0.0,
-        "spam": 0.0,
-        "cost": 0.0,
-        "final_outcome": 0.0,
+        "satisfaction_gain": 0.0,
+        "annoyance_penalty": 0.0,
+        "obligation_penalty": 0.0,
+        "cost_penalty": 0.0,
+        "stage_progress": 0.0,
+        "delay_penalty": 0.0,
+        "terminal": 0.0,
     }
 
-    # --- Engagement: reward user replies + stage progress ---
-    if user_event != "no_reply":
-        if info.get("stage_after") != info.get("stage_before"):  # From info
-            components["engagement"] += 0.05
+    # ── satisfaction gain ─────────────────────────────────────────────────────
+    sat_before = state_before.get("satisfaction", 0.5)
+    sat_after  = state_after.get("satisfaction", 0.5)
+    components["satisfaction_gain"] = sat_after - sat_before
 
-    # --- Relevance: use Observation fields ---
-    components["relevance"] = 0.1 if action.action_type == "PROVIDE_INFO" else 0.0
+    # ── annoyance penalty ─────────────────────────────────────────────────────
+    ann_before = state_before.get("annoyance", 0.0)
+    ann_after  = state_after.get("annoyance", 0.0)
+    annoyance_delta = ann_after - ann_before
+    components["annoyance_penalty"] = -annoyance_delta   # negative when annoyance rises
 
-    # --- Spam / annoyance penalty ---
-    annoyance_after = state_after.get("annoyance", obs.sentiment * -0.5)  # Fallback to obs
-    if action.action_type not in ("WAIT",) and annoyance_after > 0.7 and user_event == "no_reply":
-        components["spam"] -= 0.05
+    # ── obligation violation penalty ──────────────────────────────────────────
+    violations = state_after.get("violation_count", 0)
+    components["obligation_penalty"] = -0.2 * violations
 
-    # --- Cost penalty ---
+    # ── cost penalty (discount cost) ──────────────────────────────────────────
     cost_before = state_before.get("cost_to_business", 0.0)
-    cost_after = state_after.get("cost_to_business", 0.0)
-    delta_cost = max(0.0, cost_after - cost_before)
-    if delta_cost > 0:
-        components["cost"] -= delta_cost
+    cost_after  = state_after.get("cost_to_business", 0.0)
+    delta_cost  = max(0.0, cost_after - cost_before)
+    components["cost_penalty"] = -delta_cost
+
+    # ── stage progress bonus ──────────────────────────────────────────────────
+    # reward the agent for advancing the conversation stage
+    stage_order = [
+        "GREETING", "DISCOVERY", "QUALIFICATION",
+        "OBJECTION_HANDLING", "NEGOTIATION", "CLOSING", "POST_SALE",
+    ]
+    stage_before = state_before.get("stage", "GREETING")
+    stage_after  = state_after.get("stage", "GREETING")
+    try:
+        idx_before = stage_order.index(stage_before)
+        idx_after  = stage_order.index(stage_after)
+        if idx_after > idx_before:
+            components["stage_progress"] = 0.05 * (idx_after - idx_before)
+    except ValueError:
+        pass  # ESCALATED / ENDED not in list — no bonus
+
+    # ── delay penalty ─────────────────────────────────────────────────────────
+    if action.action_type == "DELAY_RESPONSE":
+        components["delay_penalty"] = -0.30
+
+    # ── terminal bonus ────────────────────────────────────────────────────────
+    # outcome strings match models.py OutcomeType exactly
+    if done:
+        outcome          = state_after.get("outcome", "IN_PROGRESS")
+        final_sat        = state_after.get("satisfaction", 0.5)
+        final_ann        = state_after.get("annoyance", 0.0)
+        total_cost       = state_after.get("cost_to_business", 0.0)
+
+        if outcome == "SALE":
+            bonus = 2.0 * final_sat - 1.0 * final_ann - 0.01 * total_cost
+            components["terminal"] = max(bonus, 0.5)   # floor: sale always positive
+        elif outcome == "ABANDONED":
+            components["terminal"] = -1.5 - final_ann
+        elif outcome == "NO_SALE":
+            components["terminal"] = -0.5
+        elif outcome == "ESCALATED":
+            components["terminal"] = 0.0              # neutral — escalation not failure
+        # IN_PROGRESS: no terminal bonus
 
     total_reward = sum(components.values())
-
-    # --- Final outcome reward on terminal step ---
-    if done:
-        outcome = state_after.get("outcome", "unresolved")
-        final_satisfaction = state_after.get("satisfaction", obs.sentiment)
-        final_annoyance = state_after.get("annoyance", 0.0)
-        total_cost = state_after.get("cost_to_business", 0.0)
-
-        outcome_bonus = 0.0
-        if outcome == "converted":
-            outcome_bonus = 3.0 * final_satisfaction - 1.5 * final_annoyance - 0.5 * total_cost
-        elif outcome == "churned":
-            outcome_bonus = -2.0 - final_annoyance
-        elif outcome == "escalated":
-            outcome_bonus = 1.0 * final_satisfaction - 0.5 * total_cost
-        else:  # unresolved
-            outcome_bonus = 0.5 * final_satisfaction - final_annoyance
-
-        components["final_outcome"] = outcome_bonus
-        total_reward += outcome_bonus
-
     return float(total_reward), components
-
-# TEST FUNCTION (remove after testing)
-if __name__ == "__main__":
-    from models import Observation, Action
-    obs = Observation(
-        chat_history=[], stage="start", intent="inquiry", 
-        sentiment=0.5, step_count=1
-    )
-    action = Action(action_type="PROVIDE_INFO")
-    info = {"user_event": "reply", "done": False}
-    
-    reward, components = compute_step_reward(obs, action, info)
-    print(f"Test reward: {reward:.3f}")
-    print(f"Components: {components}")

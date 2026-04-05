@@ -8,25 +8,20 @@ tasks:
     description: >
       A warm, receptive customer who is already interested in the product.
       The agent must confirm needs, present value clearly, and close efficiently.
-      Good starting task for new agents.
     difficulty: easy
     max_steps: 15
     initial_state:
       trust_range: [0.5, 0.7]
       patience_range: [0.75, 0.95]
-      satisfaction_range: [0.45, 0.65]
+      satisfaction_range: [0.4, 0.6]
       conversion_prob_range: [0.4, 0.6]
     user_type_weights:
-      IMPULSIVE: 0.35
-      ANALYTICAL: 0.20
-      SKEPTICAL: 0.05
-      LOYAL: 0.20
-      PRICE_SENSITIVE: 0.20
-    reward_weights:
-      conversion_bonus: 2.0
-      annoyance_penalty: 1.0
-      obligation_penalty: 0.2
-      cost_penalty: 0.01
+      IMPULSIVE: 0.25
+      ANALYTICAL: 0.25
+      SKEPTICAL: 0.15
+      LOYAL: 0.10
+      PRICE_SENSITIVE: 0.25
+    reward_weights: {}
     tags: [beginner, warm_lead, short_episode]
 
   task2:
@@ -49,11 +44,7 @@ tasks:
       SKEPTICAL: 0.15
       LOYAL: 0.10
       PRICE_SENSITIVE: 0.25
-    reward_weights:
-      conversion_bonus: 2.0
-      annoyance_penalty: 1.2
-      obligation_penalty: 0.2
-      cost_penalty: 0.015
+    reward_weights: {}
     tags: [intermediate, mixed_signals, negotiation]
 
   task3:
@@ -63,13 +54,12 @@ tasks:
       A skeptical, analytical customer who is hard to convince and quick to
       abandon the conversation. The agent must build trust patiently, resolve
       deep objections, and avoid any missteps that increase annoyance.
-      Designed for advanced agents.
     difficulty: hard
     max_steps: 25
     initial_state:
       trust_range: [0.2, 0.45]
       patience_range: [0.4, 0.65]
-      satisfaction_range: [0.3, 0.5]
+      satisfaction_range: [0.4, 0.6]
       conversion_prob_range: [0.15, 0.35]
     user_type_weights:
       IMPULSIVE: 0.10
@@ -77,11 +67,7 @@ tasks:
       SKEPTICAL: 0.35
       LOYAL: 0.05
       PRICE_SENSITIVE: 0.20
-    reward_weights:
-      conversion_bonus: 2.5
-      annoyance_penalty: 1.5
-      obligation_penalty: 0.3
-      cost_penalty: 0.02
+    reward_weights: {}
     tags: [advanced, skeptical_lead, long_episode, trust_building]
 
 metadata:
