@@ -11,7 +11,7 @@ Required environment variables:
 STDOUT FORMAT (one [START], N [STEP]s, one [END] per episode):
   [START] task=<task_id> env=whatsapp_sales_rl model=<model_name>
   [STEP]  step=<n> action=<action_type> reward=<0.00> done=<true|false> error=<msg|null>
-  [END]   success=<true|false> steps=<n> rewards=<r1,r2,...,rn>
+  [END]   success=<true|false> steps=<n> score=<0.00> rewards=<r1,r2,...,rn>
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import json
 import os
 import sys
 import textwrap
-from typing import List, Optional
+from typing import List, Optional, Tuple, Any
 
 from openai import OpenAI
 
@@ -29,20 +29,24 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from env import make_env
 from models import Action, Observation
+from reward.grading import grade_trajectory
 
 # ── env vars ──────────────────────────────────────────────────────────────────
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME   = os.getenv("MODEL_NAME",   "Qwen/Qwen2.5-72B-Instruct")
-API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
+API_BASE_URL     = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME       = os.getenv("MODEL_NAME",   "Qwen/Qwen2.5-72B-Instruct")
+HF_TOKEN         = os.getenv("HF_TOKEN")
+OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
+LLM_API_KEY      = HF_TOKEN or OPENAI_API_KEY
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
-BENCHMARK    = "whatsapp_sales_rl"
-TASKS        = ["task1", "task2", "task3"]
+BENCHMARK  = "whatsapp_sales_rl"
+TASKS      = ["task1", "task2", "task3"]
+TASK_SEEDS = {"task1": 42, "task2": 43, "task3": 44}
 
-TEMPERATURE  = 0.3
-MAX_TOKENS   = 256
+TEMPERATURE = 0.0
+MAX_TOKENS  = 256
 
-# SALE or ESCALATED are both non-negative terminal outcomes
-SUCCESS_OUTCOMES = {"SALE", "ESCALATED"}
+SUCCESS_OUTCOMES = {"SALE"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -68,10 +72,11 @@ def log_step(
     )
 
 
-def log_end(success: bool, steps: int, rewards: List[float]) -> None:
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score:.2f} rewards={rewards_str}",
         flush=True,
     )
 
@@ -116,15 +121,14 @@ Available actions:
 
 
 def _build_user_prompt(obs: Observation, step: int) -> str:
-    history_text = "\n".join(obs.chat_history[-6:]) if obs.chat_history else "None"
+    history_text  = "\n".join(obs.chat_history[-6:]) if obs.chat_history else "None"
     uncertainties = ", ".join(obs.uncertainties) if obs.uncertainties else "none"
-    pending = obs.obligations.pending
+    pending       = obs.obligations.pending
     obligations_text = (
         "\n".join(f"  - [{o.type}] {o.description}" for o in pending)
         if pending else "  none"
     )
 
-    # Coaching hint driven by live state signals
     if "low_patience" in obs.uncertainties:
         hint = "WARNING: Customer patience is low. Wrap up fast — use GIVE_PRICE or PROVIDE_INFO."
     elif "low_trust" in obs.uncertainties:
@@ -166,10 +170,6 @@ def _build_user_prompt(obs: Observation, step: int) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _call_llm(client: OpenAI, obs: Observation, step: int) -> dict:
-    """
-    Ask the LLM for an action. Returns a dict with at minimum 'action_type'.
-    Falls back to an empty dict (triggers heuristic) on any error.
-    """
     user_prompt = _build_user_prompt(obs, step)
     try:
         completion = client.chat.completions.create(
@@ -183,7 +183,6 @@ def _call_llm(client: OpenAI, obs: Observation, step: int) -> dict:
         )
         raw = (completion.choices[0].message.content or "").strip()
 
-        # Strip markdown fences if the model wraps its JSON
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -194,7 +193,7 @@ def _call_llm(client: OpenAI, obs: Observation, step: int) -> dict:
         return parsed
 
     except Exception as exc:
-        print(f"[DEBUG] LLM call failed at step {step}: {exc}", flush=True)
+        print(f"LLM call failed at step {step}: {exc}", file=sys.stderr, flush=True)
         return {}
 
 
@@ -207,71 +206,57 @@ VALID_ACTIONS = {
     "PROVIDE_INFO", "ESCALATE", "DELAY_RESPONSE", "END_CONVERSATION",
 }
 
-# Stage-aware fallback policy (used when LLM output is invalid/missing)
 _STAGE_FALLBACK = {
-    "GREETING":           ("ASK_QUESTION",   "How can I help you today?"),
-    "DISCOVERY":          ("ASK_QUESTION",   "Could you tell me more about what you're looking for?"),
-    "QUALIFICATION":      ("PROVIDE_INFO",   "Here's what makes our product a great fit for you."),
-    "OBJECTION_HANDLING": ("PROVIDE_INFO",   "Let me address your concerns directly."),
-    "NEGOTIATION":        ("OFFER_DISCOUNT", "10"),
-    "CLOSING":            ("PROVIDE_INFO",   "You've made a great choice!"),
-    "POST_SALE":          ("PROVIDE_INFO",   "Thank you for your purchase!"),
-    "ESCALATED":          ("ESCALATE",       "Let me connect you with someone senior."),
+    "GREETING":           ("ASK_QUESTION",    "How can I help you today?"),
+    "DISCOVERY":          ("ASK_QUESTION",    "Could you tell me more about what you're looking for?"),
+    "QUALIFICATION":      ("PROVIDE_INFO",    "Here's what makes our product a great fit for you."),
+    "OBJECTION_HANDLING": ("PROVIDE_INFO",    "Let me address your concerns directly."),
+    "NEGOTIATION":        ("OFFER_DISCOUNT",  "10"),
+    "CLOSING":            ("PROVIDE_INFO",    "You've made a great choice!"),
+    "POST_SALE":          ("PROVIDE_INFO",    "Thank you for your purchase!"),
+    "ESCALATED":          ("ESCALATE",        "Let me connect you with someone senior."),
     "ENDED":              ("END_CONVERSATION","Thank you for your time."),
 }
 
-# Module-level flag: only one discount per episode
 _discount_used: bool = False
 
 
 def _build_action(llm_output: dict, obs: Observation) -> Action:
-    """
-    Convert LLM JSON dict → validated Action.
-    Applies safety overrides, then falls back to stage heuristic on error.
-    """
     global _discount_used
 
     action_type = str(llm_output.get("action_type", "")).upper()
     message     = str(llm_output.get("message", ""))
     discount    = llm_output.get("discount_pct")
 
-    # ── safety overrides ──────────────────────────────────────────────────────
-
-    # Block DELAY_RESPONSE always
     if action_type == "DELAY_RESPONSE":
         action_type = "PROVIDE_INFO"
         message = "Here's some more information that might help you decide."
 
-    # Block repeated discounts — only one per episode
     if action_type == "OFFER_DISCOUNT" and _discount_used:
         action_type = "PROVIDE_INFO"
         message = "Let me share more details about why this is a great choice."
 
-    # Block discounts when trust is low — they don't help and cost a lot
     if action_type == "OFFER_DISCOUNT" and "low_trust" in obs.uncertainties:
         action_type = "PROVIDE_INFO"
         message = "Let me explain exactly what you're getting and why it's worth it."
 
-    # Fulfil pending obligations immediately
     if obs.obligations.has_pending and action_type not in {"PROVIDE_INFO", "ASK_QUESTION", "ESCALATE"}:
         action_type = "PROVIDE_INFO"
         message = "Let me follow up on your earlier request."
 
-    # ── build Action ──────────────────────────────────────────────────────────
     try:
         if action_type not in VALID_ACTIONS:
             raise ValueError(f"Unknown action: {action_type}")
 
         if action_type == "OFFER_DISCOUNT":
             pct = float(discount) if discount is not None else 10.0
-            pct = max(5.0, min(15.0, pct))   # hard cap: 5–15%
+            pct = max(5.0, min(15.0, pct))
             _discount_used = True
             return Action(action_type="OFFER_DISCOUNT", message=message, discount_pct=pct)
 
         return Action(action_type=action_type, message=message)
 
     except Exception:
-        # Stage-aware fallback
         fallback_type, fallback_msg = _STAGE_FALLBACK.get(
             obs.stage, ("ASK_QUESTION", "How can I help?")
         )
@@ -294,23 +279,24 @@ def _build_action(llm_output: dict, obs: Observation) -> Action:
 def run_episode(client: OpenAI, task_id: str) -> None:
     """Run one complete episode for the given task and emit structured logs."""
     global _discount_used
-    _discount_used = False          # reset per episode
+    _discount_used = False
 
-    rewards:       List[float] = []
-    steps_taken:   int         = 0
-    success:       bool        = False
-    final_outcome: str         = "IN_PROGRESS"
+    rewards:       List[float]                       = []
+    trajectory:    List[Tuple[Any, Any, float, Any]] = []
+    steps_taken:   int                               = 0
+    success:       bool                              = False
+    final_outcome: str                               = "IN_PROGRESS"
 
     log_start(task=task_id, model=MODEL_NAME)
 
     try:
         env = make_env(task_id=task_id)
+        env.seed(TASK_SEEDS.get(task_id, 42))
         obs = env.reset()
 
         while not env.state().episode_done:
             step = steps_taken + 1
 
-            # Ask LLM for action
             llm_output = _call_llm(client, obs, step)
             action     = _build_action(llm_output, obs)
 
@@ -319,8 +305,7 @@ def run_episode(client: OpenAI, task_id: str) -> None:
                 obs, reward, done, info = env.step(action)
             except Exception as exc:
                 error_str = str(exc).replace("\n", " ")[:120]
-                print(f"[DEBUG] env.step() error: {error_str}", flush=True)
-                # Guaranteed-safe fallback
+                print(f"env.step() error: {error_str}", file=sys.stderr, flush=True)
                 safe_action = Action(
                     action_type="ASK_QUESTION",
                     message="Could you tell me more?",
@@ -328,6 +313,7 @@ def run_episode(client: OpenAI, task_id: str) -> None:
                 obs, reward, done, info = env.step(safe_action)
 
             rewards.append(reward)
+            trajectory.append((obs, action, reward, info))
             steps_taken   = step
             final_outcome = info.get("outcome", "IN_PROGRESS")
 
@@ -343,11 +329,15 @@ def run_episode(client: OpenAI, task_id: str) -> None:
                 break
 
     except Exception as exc:
-        print(f"[DEBUG] Episode failed: {exc}", flush=True)
+        print(f"Episode failed: {exc}", file=sys.stderr, flush=True)
         final_outcome = "IN_PROGRESS"
 
+    # ── compute grader score strictly in (0.01, 0.99) ─────────────────────────
+    raw_score = grade_trajectory(trajectory, task_id=task_id)
+    score     = round(min(max(raw_score, 0.01), 0.99), 2)
+
     success = final_outcome in SUCCESS_OUTCOMES
-    log_end(success=success, steps=steps_taken, rewards=rewards)
+    log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -355,7 +345,7 @@ def run_episode(client: OpenAI, task_id: str) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    client = OpenAI(base_url=API_BASE_URL, api_key=LLM_API_KEY)
     for task_id in TASKS:
         run_episode(client, task_id)
 
