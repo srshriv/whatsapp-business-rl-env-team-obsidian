@@ -587,6 +587,32 @@ Python 3.11 or higher required.
 - [x] Inference runtime under 20 minutes on 2 vCPU / 8 GB RAM
 
 ---
+
+## What Makes This Environment Novel
+
+Three design decisions set this environment apart from existing OpenEnv submissions:
+
+**1. Obligation Tracking System**
+Most conversational RL environments treat each turn as independent. This
+environment tracks commitments made by both the agent and the customer across
+turns. If the agent says "I'll send you the specs" and fails to follow up
+within 4 steps, the customer's trust and satisfaction drop — exactly as they
+would in a real sales conversation.
+
+**2. Stochastic Persona System**
+Five distinct customer archetypes (IMPULSIVE, ANALYTICAL, SKEPTICAL, LOYAL,
+PRICE_SENSITIVE) each respond differently to the same action. A 10% discount
+closes an IMPULSIVE customer immediately but makes a SKEPTICAL customer more
+suspicious. This forces the agent to infer persona from behaviour rather than
+being told it directly.
+
+**3. Noisy Partial Observability**
+The agent never sees the true customer state. Sentiment is observed with
+Gaussian noise (σ=0.05), trust and patience are hidden entirely. The agent
+must make decisions under genuine uncertainty — the same uncertainty a human
+sales agent faces.
+
+
  #AUTHOR
 
  TEAM OBSIDIAN
